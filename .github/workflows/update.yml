@@ -1,0 +1,56 @@
+name: Daily market refresh
+on:
+  schedule:
+    - cron: "20 1 * * 1-5"
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Refresh public market anchors
+        run: |
+          python - <<'PY'
+          import csv, io, re, urllib.request
+          from pathlib import Path
+
+          symbols = {
+              "LME铜": "hg.f",
+              "伦敦金": "gc.f",
+              "LME镍": "ni.f",
+              "费城半导体指数": "^sox",
+          }
+          text = Path("app.js").read_text()
+
+          def quote(symbol):
+              url = f"https://stooq.com/q/d/l/?s={symbol}&i=d"
+              req = urllib.request.Request(url, headers={"User-Agent": "cycle-radar/2.0"})
+              rows = list(csv.DictReader(io.StringIO(urllib.request.urlopen(req, timeout=20).read().decode())))
+              rows = [r for r in rows if r.get("Close") not in ("", None, "N/D")]
+              values = [float(r["Close"]) for r in rows[-8:]]
+              return values[-1], round((values[-1] / values[-2] - 1) * 100, 2), round((values[-1] / values[-6] - 1) * 100, 2)
+
+          for name, symbol in symbols.items():
+              try:
+                  value, day, week = quote(symbol)
+                  shown = f"{value:,.2f}".rstrip("0").rstrip(".")
+                  pattern = r"(\['" + re.escape(name) + r"',')[^']+(','[^']+',)[^,]+,[^,]+,"
+                  replacement = r"\1" + shown + r"\2" + str(day) + "," + str(week) + ","
+                  text = re.sub(pattern, replacement, text, count=1)
+              except Exception as exc:
+                  print(f"preserving {name}: {exc}")
+
+          Path("app.js").write_text(text)
+          PY
+      - name: Commit updated prices
+        run: |
+          git config user.name "cycle-radar-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add app.js
+          git diff --cached --quiet || git commit -m "data: daily market refresh"
+          git push
